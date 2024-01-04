@@ -3,14 +3,17 @@ __author__ = "Xavier Hernandez-Alias"
 Module for optimizing the codon usage of a sequence based on tissue 
 specificities. 
 '''
-from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor, as_completed
+import collections
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
+# from networkx import difference
 import pkg_resources
 import numpy as np
 import pandas as pd
 import RNA
-from sympy import N
-
+import copy
+# from sympy import N
+processor_count = 80 
 # Load data required for optimization
 GENETIC_CODE = {
     'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
@@ -126,8 +129,26 @@ def action(metric,to_do):
                         "or 'min' to indicate whether each "
                         "metric should be maximized or minimized.")
 
+def DIF_seq(seq1,seq2):
+    count = 0
+    for a,b in zip(seq1,seq2):
+        if a != b:
+            count += 1
+    return count
 
-def optimize_single_codon(aa,prob_dict):
+def get_top_kernel_sequence(seq_pool,top):
+    new_seq_list = []
+    for seq in seq_pool:
+        for target_seq in new_seq_list:
+            if DIF_seq(seq,target_seq) < 10:
+                break
+        else:
+            new_seq_list.append(seq)
+            if len(new_seq_list) == top:
+                break
+    return new_seq_list
+
+def optimize_single_codon_respect_original(aa,raw_codon,prob_dict,codon_change_probdict,disturb=0.1):
     codons = list(prob_dict[aa].keys())
     newcodon = ""
     while not newcodon:
@@ -142,47 +163,153 @@ def optimize_single_codon(aa,prob_dict):
             elif prob_dict[aa][action][1]==False:
                 codons.remove(action)
             else:
-                if np.random.uniform()<=0.5:
+                #尊重原序列：
+                if codon_change_probdict[aa][raw_codon] > 0:
+                    if np.random.uniform() <= codon_change_probdict[aa][raw_codon]:
+                        codons = np.array([c for c in codons if codon_change_probdict[aa][c] < 0])
+                        probs = np.array([codon_change_probdict[aa][c] for c in codons if codon_change_probdict[aa][c] < 0])
+                        probs = probs / np.sum(probs)
+                        if len(codons) == 0:
+                            newcodon = action
+                        else:
+                            action = np.random.choice(codons,p=probs)
+                            newcodon = action
+                    elif np.random.uniform() <= disturb:
+                        newcodon = action
+                    else:
+                        newcodon = raw_codon
+                elif np.random.uniform() <= disturb:
                     newcodon = action
                 else:
-                    codons.remove(action)
+                    newcodon = raw_codon     
     return newcodon
 
-def optimize_single_seq(sequence,prob_dict,prob_original):
+def optimize_single_seq_respect_original(sequence,prob_dict,prob_original,disturb=0.1):
+    np.random.seed(int(float(str((time.time()*1E6))[-8:])))
     seqcodons = [sequence[n:n+3] for n in range(0,len(sequence),3)]
+    codon_usage = collections.defaultdict(lambda:collections.defaultdict())
+    for codon,aa in GENETIC_CODE.items():
+        codon_usage[aa][codon] = seqcodons.count(codon)
+    codon_change_probdict = collections.defaultdict(lambda:collections.defaultdict())
+    for aa in list(codon_usage):
+        all_count = sum(i for i in codon_usage[aa].values())
+        for codon,count in codon_usage[aa].items():
+            if all_count == 0:
+                ratio = 0
+            else:
+                ratio = count / all_count
+            if codon not in ["ATG","TAA","TGA","TAG"]:
+                # print(aa,codon)
+                if codon not in prob_dict[aa]:
+                    codon_change_probdict[aa][codon] = ratio
+                else:
+                    codon_change_probdict[aa][codon] = ratio - prob_dict[aa][codon][0]
+                    # print(aa,codon,ratio,prob_dict[aa][codon][0])
+    # print(codon_change_probdict)
     # Create pool of optimized sequences
     finalseq = ""
-    # for n in range(self.n_pool):
-    # while len(finalseq) != len(sequence):
-        # for n,codon in enumerate(seqcodons):
     n = 0
-    # print("final_seq",finalseq)
+    error_count = 0
     while n < len(seqcodons):
         # prob_original allows to take a conservative optimization if wanted
         codon = seqcodons[n]
+        aa = GENETIC_CODE[codon]
         if codon in ["ATG","TGG","TAA","TGA","TAG"]: # do not touch stop codons nor ATG or TGG
             finalseq += codon
+        elif prob_dict[aa][codon][1]==False:
+            finalseq += optimize_single_codon_respect_original(aa,codon,prob_dict,codon_change_probdict,disturb=disturb)
+        elif prob_dict[aa][codon][1]==True:
+            finalseq += codon
         elif np.random.uniform() >= prob_original:
-            aa = GENETIC_CODE[codon]
-            # newseq.append(optaa(self,aa))
-            finalseq += optimize_single_codon(aa,prob_dict)
+            finalseq += optimize_single_codon_respect_original(aa,codon,prob_dict,codon_change_probdict,disturb=disturb)
         else:
             finalseq += codon
-        if any(i in finalseq[-9:] for i in ["AAAAAAA","GGGGGGG","TTTTTTT","CCCCCCC"]):
+        if any(i in finalseq[-9:] for i in ["AAAAAAAA","GGGGGGGG","TTTTTTTT","CCCCCCCC"]) and error_count < 5:
+            error_count += 1
             finalseq = finalseq[:-9]
             n = n - 3
+        elif any(i in finalseq[-9:] for i in ["AAAAAAAA","GGGGGGGG","TTTTTTTT","CCCCCCCC"]) and error_count > 5:
+            error_count = 0
         n = n + 1
     return finalseq
 
 
-def get_data_in_pool(func,pool):
-    thread_pool = ProcessPoolExecutor(40)
+def trans_dna2aa(sequence):
+    aa_list = []
+    aa_dict = collections.defaultdict(list)
+    seqcodons = [sequence[n:n+3] for n in range(0,len(sequence),3)]
+
+
+def trans_aa2dna():
+    ...
+def optimize_aa_set():
+    ...
+
+def optimize_single_seq_by_aa_set(sequence,prob_dict,prob_original):
+    ...
+
+
+def get_random_single_codon(aa,prob_dict):
+    codons = list(prob_dict[aa].keys())
+    newcodon = ""
+    while not newcodon:
+        if len(codons)==1:
+            newcodon = codons[0]
+        else:
+            probs = np.array([prob_dict[aa][c][0] for c in codons])
+            probs = probs/np.sum(probs)
+            action = np.random.choice(codons,p=probs)
+            newcodon = action
+    return newcodon
+
+def get_random_prob_dict(prob_dict):
+    new_prob_dict = copy.deepcopy(prob_dict)
+    for aa in new_prob_dict:
+        for c in new_prob_dict[aa]:
+            new_prob_dict[aa][c][0] = new_prob_dict[aa][c][0] * np.random.choice([0.5,1.5])
+    return new_prob_dict
+
+def get_random_single_seq(sequence,prob_dict,counts=1):
+    seqcodons = [sequence[n:n+3] for n in range(0,len(sequence),3)]
+    finalseq_list = []
+    for _ in range(counts):
+        random_prob_dict = get_random_prob_dict(prob_dict)
+        finalseq = ""
+        n = 0
+        error_count = 0
+        while n < len(seqcodons):
+            codon = seqcodons[n]
+            aa = GENETIC_CODE[codon]
+            if codon in ["ATG","TGG","TAA","TGA","TAG"]: # do not touch stop codons nor ATG or TGG
+                finalseq += codon
+            else:
+                finalseq += get_random_single_codon(aa,random_prob_dict)
+            if any(i in finalseq[-9:] for i in ["AAAAAAAA","GGGGGGGG","TTTTTTTT","CCCCCCCC"]) and error_count < 5:
+                error_count += 1
+                finalseq = finalseq[:-9]
+                n = n - 3
+            elif any(i in finalseq[-9:] for i in ["AAAAAAAA","GGGGGGGG","TTTTTTTT","CCCCCCCC"]) and error_count > 5:
+                error_count = 0
+            n = n + 1
+        finalseq_list.append(finalseq)
+    finalseq_list = list(set(finalseq_list))
+    return finalseq_list
+
+def get_data_in_pool(func,pool,func_type=None,record={"MFE":{},"MFEini":{},"CAI":{},"ENC":{},"GC":{}}):
+    thread_pool = ProcessPoolExecutor(processor_count)
     task_list = []
-    for index,seq in enumerate(pool):
-        task_list.append(thread_pool.submit(func,index,seq))
     result_list = []
+    for index,seq in enumerate(pool):
+        # if func_type is not None and seq in record[func_type]:
+        #     result_list.append((index,record[func_type][seq]))
+        # else:
+            task_list.append(thread_pool.submit(func,index,seq))
+    
     for task in as_completed(task_list):
-        result_list.append(task.result())
+        index,value = task.result()
+        # if func_type is not None:
+        #     record[func_type][pool[index]] = value
+        result_list.append((index,value))
     result_list = sorted(result_list,key=lambda x:x[0])
     return [i[1] for i in result_list]
 
@@ -201,7 +328,8 @@ def get_MFEini(index,seq):
 def get_CAI(index,seq):
     seqcodons = [seq[n:n+3] for n in range(0,len(seq),3)]
     codus = {c:seqcodons.count(c) for c in set(seqcodons) if c not in ["TAA","TGA","TAG"]}
-    cai_codus = [(codnorm.loc[c,"Homo_sapiens"]**(1/sum(codus.values())))**codus[c] for c in codus.keys()]
+    codon_counts = sum(codus.values())
+    cai_codus = [(codnorm.loc[c,"Homo_sapiens"]**(1/codon_counts))**codus[c] for c in codus.keys()]
     return index,np.prod(cai_codus)
 
 
@@ -323,6 +451,7 @@ class TissueOptimizer:
                             "Smoothmuscle, Pancreas, Ovary.")
     def caculate_codonprob(self):
         threshold = np.percentile(codon_ratios.loc[self.tissue,:].abs(),(1.0-self.degree)*100)
+        print("阈值：",threshold)
         codonprob = {}
         for aa in set(GENETIC_CODE.values()):
             aa_codons = [c for c in GENETIC_CODE.keys() if np.logical_and((GENETIC_CODE[c] is aa),(c not in ["ATG","TGG","TAA","TGA","TAG"]))]
@@ -338,16 +467,18 @@ class TissueOptimizer:
             coddirection = {c:codon_ratios.loc[self.tissue,c]>0 if np.abs(codon_ratios.loc[self.tissue,c])>threshold else np.nan for c in aa_codons}
             codonprob[aa] = {c:[codweights[c]/sumweights,coddirection[c]] for c in aa_codons}
         # self.codonprob = codonprob
+        # print(codonprob)
         return codonprob
     
+ 
 
-    def get_optimized_seq_pool(self, sequence):
+    def get_optimized_seq_pool(self, sequence,pool_count,disturb=0.1):
         # print(optimize_single_seq(sequence,self.codonprob,self.prob_original))
         # return optimize_single_seq(sequence,self.codonprob,self.prob_original)
-        thread_pool = ThreadPoolExecutor(30)
+        thread_pool = ProcessPoolExecutor(processor_count)
         task_list = []
-        for _ in range(self.n_pool-1):
-            task_list.append(thread_pool.submit(optimize_single_seq,sequence,self.codonprob,self.prob_original))
+        for _ in range(pool_count-1):
+            task_list.append(thread_pool.submit(optimize_single_seq_respect_original,sequence,self.codonprob,self.prob_original,disturb))
         final_seq_list = [sequence]
         for task in as_completed(task_list):
             final_seq_list.append(task.result())
@@ -355,7 +486,7 @@ class TissueOptimizer:
 
 
     def select_best(self,sequence, by={"MFE":"min","CAI":"max","CPB":"max","ENC":"min"},
-                    homopolymers=0, exclude_motifs = [], top=None): #,"GC":55
+                    homopolymers=0, exclude_motifs = [],keep_wild_type=True, top=10,cycle=10,stop_require=10,disturb=0.1): #,"GC":55
         '''
         Sort the pool of generated sequences based on different metrics, and
         output the best ones.
@@ -383,54 +514,101 @@ class TissueOptimizer:
         -------
         best = DataFrame
         '''
+        print("开始密码子优化")
         relative_codons()
         compute_CPS()
         self.codonprob = self.caculate_codonprob()
-        print(time.time())
-        optimized_seq_pool =  self.get_optimized_seq_pool(sequence)
-        print(time.time())
         
-        select_df = pd.DataFrame(index = range(self.n_pool))
-        select_df["Sequence"] = optimized_seq_pool
-        norm_df = pd.DataFrame(index = range(self.n_pool))
-        
-        for c in by:
-            if c=="MFE":
-                # metric = np.array(self.MFE())
-                metric = np.array(get_data_in_pool(get_MFE,optimized_seq_pool))
-                norm = action(metric,by[c])
-            elif c=="MFEini":
-                metric = np.array(get_data_in_pool(get_MFEini,optimized_seq_pool))
-                norm = action(metric,by[c])
-            elif c=="CAI":
-                metric = np.array(get_data_in_pool(get_CAI,optimized_seq_pool))
-                norm = action(metric,by[c])
-            elif c=="CPB":
-                metric = np.array(get_data_in_pool(get_CPB,optimized_seq_pool))
-                # metric = np.array(self.CPB())
-                norm = action(metric,by[c])
-            elif c=="ENC":
-                metric = np.array(get_data_in_pool(get_ENC,optimized_seq_pool))
-                norm = action(metric,by[c])
-            elif c=="GC":
-                metric = np.array(get_data_in_pool(get_GC,optimized_seq_pool))
-                norm = action(np.abs(metric-by[c]),"min")
+        # optimized_seq_pool =  self.get_optimized_seq_pool(sequence,self.n_pool)
+        # print(time.time())
+        # sequence_list = [sequence]
+        if keep_wild_type:
+            sequence_list = [sequence]
+        else:
+            sequence_list = get_random_single_seq(sequence,self.codonprob,100)
+            print("100个随机序列生成成功")
+        difference_list = []
+        continue_difference = 0
+        history_top_seq = []
+        for cycle_times in range(cycle):
+            # print(time1 := time.time())
+            print("cycle_times:",cycle_times)
+            optimized_seq_pool = [*history_top_seq]
+            for seq in sequence_list:
+                optimized_seq_pool.extend(self.get_optimized_seq_pool(seq,self.n_pool,disturb))
+            
+            optimized_seq_pool = list({i:... for i in optimized_seq_pool})    
+            print("序列池生成成功：",pool_count := len(optimized_seq_pool))
+            select_df = pd.DataFrame(index = range(pool_count))
+            select_df["Sequence"] = optimized_seq_pool
+            
+            norm_df = pd.DataFrame(index = range(pool_count))
+            for c in by:
+                print("计算：",c)
+                if c=="MFE": #MFE MFEini CAI ENC GC
+                    # metric = np.array(self.MFE())
+                    metric = np.array(get_data_in_pool(get_MFE,optimized_seq_pool))
+                    norm = action(metric,by[c])
+                elif c=="MFEini":
+                    metric = np.array(get_data_in_pool(get_MFEini,optimized_seq_pool))
+                    norm = action(metric,by[c])
+                elif c=="CAI":
+                    metric = np.array(get_data_in_pool(get_CAI,optimized_seq_pool))
+                    norm = action(metric,by[c])
+                elif c=="CPB":
+                    metric = np.array(get_data_in_pool(get_CPB,optimized_seq_pool))
+                    # metric = np.array(self.CPB())
+                    norm = action(metric,by[c])
+                elif c=="ENC":
+                    metric = np.array(get_data_in_pool(get_ENC,optimized_seq_pool))
+                    norm = action(metric,by[c])
+                elif c=="GC":
+                    metric = np.array(get_data_in_pool(get_GC,optimized_seq_pool))
+                    norm = action(np.abs(metric-by[c]),"min")
+                else:
+                    raise TypeError("Invalid 'by' argument.")
+                select_df[c] = metric
+                # Normalize between 0 and 1
+                norm_metric = (norm-np.min(norm))/np.ptp(norm)
+                norm_df[c] = norm_metric
+            # Create a score based on metrics
+            if "GC" not in select_df:
+                select_df["GC"] = np.array(get_data_in_pool(get_GC,optimized_seq_pool))
+
+            #参数钝化
+            if keep_wild_type:
+                norm_df = norm_df - norm_df.iloc[0]
+                norm_df[norm_df > 0.2] = 0.2 + (norm_df[norm_df > 0.2] - 0.2) * 0.2
+            
+            select_df["Score"] = norm_df.mean(axis=1)
+            
+            for m in exclude_motifs:
+                idx = np.array([m in seq for seq in select_df.Sequence])
+                select_df = select_df.loc[np.logical_not(idx),:]
+            if keep_wild_type:
+                best = pd.concat([select_df.iloc[:1,],select_df.iloc[1:,].sort_values(by="Score", ascending=False)],ignore_index=True)
             else:
-                raise TypeError("Invalid 'by' argument.")
-            select_df[c] = metric
-            # Normalize between 0 and 1
-            norm_metric = (norm-np.min(norm))/np.ptp(norm)
-            norm_df[c] = norm_metric
-        # Create a score based on metrics
-        if "GC" not in select_df:
-            select_df["GC"] = np.array(get_data_in_pool(get_GC,optimized_seq_pool))
-        select_df["Score"] = norm_df.mean(axis=1)
+                best = select_df.sort_values(by="Score", ascending=False)
+            print("开始挑选特征序列")
+            new_sequence_list = get_top_kernel_sequence(best["Sequence"],top)
+            
+            # new_sequence_list = best["Sequence"].iloc[:top]
+            difference = len(set(new_sequence_list) - set(sequence_list))
+            if difference == 0:
+                continue_difference += 1
+            else:
+                continue_difference = 0
+            difference_list.append(difference)
+            sequence_list = new_sequence_list
+            history_top_seq.extend(new_sequence_list)
+
+            print(best[:10])
+            print(difference_list)
+            if continue_difference > stop_require:
+                break
+        if keep_wild_type:
+            best["Sequence"][0] = "wt:" + best["Sequence"][0]
         
-        for m in exclude_motifs:
-            idx = np.array([m in seq for seq in select_df.Sequence])
-            select_df = select_df.loc[np.logical_not(idx),:]
-        best = pd.concat([select_df.iloc[:1,],select_df.iloc[1:,].sort_values(by="Score", ascending=False)],ignore_index=True)
-        best["Sequence"][0] = "wt:" + best["Sequence"][0]
         return best
     
 
@@ -493,7 +671,7 @@ class TissueOptimizer_Caculator:
     >>> best_seq = opt.select_best(top=10)
     
     '''
-    def __init__(self, tissue, n_pool=1000, degree=0.5, prob_original=0.0):
+    def __init__(self, tissue, n_pool=2000, degree=0.5, prob_original=0.0):
         if tissue in codon_weights.index:
             self.tissue = tissue
             self.n_pool = n_pool
@@ -531,11 +709,11 @@ class TissueOptimizer_Caculator:
         return codonprob
     
 
-    def get_optimized_seq_pool(self, sequence_list):
-        thread_pool = ThreadPoolExecutor(30)
+    def get_optimized_seq_pool(self, sequence_list,disturb=0.1):
+        thread_pool = ProcessPoolExecutor(processor_count)
         task_list = []
-        for _ in range(self.n_pool-len(sequence_list)):
-            task_list.append(thread_pool.submit(optimize_single_seq,np.random.choice(sequence_list),self.codonprob,self.prob_original))
+        for i in range(self.n_pool-len(sequence_list)):
+            task_list.append(thread_pool.submit(optimize_single_seq_respect_original,np.random.choice(sequence_list),self.codonprob,self.prob_original,disturb))
         final_seq_list = [*sequence_list]
         for task in as_completed(task_list):
             final_seq_list.append(task.result())
@@ -543,7 +721,7 @@ class TissueOptimizer_Caculator:
 
 
     def select_best(self,sequence_list,sequence_name_list, by={"MFE":"min","CAI":"max","CPB":"max","ENC":"min"},
-                    homopolymers=0, exclude_motifs = [], top=None): #,"GC":55
+                    homopolymers=0, exclude_motifs = [],disturb=0.1, top=None): #,"GC":55
         '''
         Sort the pool of generated sequences based on different metrics, and
         output the best ones.
@@ -574,7 +752,8 @@ class TissueOptimizer_Caculator:
         relative_codons()
         compute_CPS()
         self.codonprob = self.caculate_codonprob()
-        optimized_seq_pool =  self.get_optimized_seq_pool(sequence_list)
+        print("开始生成序列池")
+        optimized_seq_pool =  self.get_optimized_seq_pool(sequence_list,disturb)
         
         
         select_df = pd.DataFrame(index = range(self.n_pool))
@@ -617,5 +796,6 @@ class TissueOptimizer_Caculator:
         # best["Sequence"][0] = "wt:" + best["Sequence"]
         best = select_df.iloc[:len(sequence_list),]
         best["SeqName"] = sequence_name_list
+        
         return best
     
